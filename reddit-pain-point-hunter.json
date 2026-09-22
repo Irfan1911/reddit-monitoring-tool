@@ -1,0 +1,272 @@
+{
+  "name": "Reddit Pain Point Hunter v2",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            { "field": "cronExpression", "expression": "*/45 * * * *" }
+          ]
+        }
+      },
+      "id": "trigger",
+      "name": "Every 45 Min",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [0, 0]
+    },
+    {
+      "parameters": {
+        "mode": "manual",
+        "assignments": {
+          "assignments": [
+            {
+              "id": "a1",
+              "name": "subreddits",
+              "type": "array",
+              "value": ["startups", "smallbusiness", "Entrepreneur", "freelance", "agency", "sysadmin", "automation", "nocode", "SaaS"]
+            },
+            {
+              "id": "a2",
+              "name": "painPatterns",
+              "type": "array",
+              "value": [
+                "is there (a|any) (tool|app|software)",
+                "does anyone know (of|a) (tool|software|app)",
+                "looking for (a )?(recommendation|solution|tool)",
+                "manually (doing|copy|update|track|export|entering)",
+                "spend(ing)? (hours|so much time)",
+                "wish there was",
+                "any(one)? (built|know of) something (like|for)",
+                "willing to pay",
+                "paying for",
+                "sick of (doing this|manually)",
+                "how do (you|i) automate",
+                "recommend a (saas|app|service)"
+              ]
+            }
+          ]
+        }
+      },
+      "id": "config",
+      "name": "Config",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [220, 0]
+    },
+    {
+      "parameters": {
+        "jsCode": "const cfg = $input.first().json;\nreturn cfg.subreddits.map(s => ({ json: { subreddit: s } }));"
+      },
+      "id": "splitSubs",
+      "name": "Split Into Subreddit Items",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [440, 0]
+    },
+    {
+      "parameters": {
+        "resource": "postLegacy",
+        "operation": "getAll",
+        "subreddit": "={{ $json.subreddit }}",
+        "category": "new",
+        "limit": 25,
+        "additionalFields": {}
+      },
+      "id": "fetchReddit",
+      "name": "Fetch Subreddit New Posts",
+      "type": "n8n-nodes-base.reddit",
+      "typeVersion": 1,
+      "notes": "VERIFY BEFORE RELYING ON: resource/operation param keys ('postLegacy'/'getAll') are my best-known mapping for this node but may differ by your n8n version. Drag this node fresh from the panel, pick Resource: Post, Operation: Get Many, fill Subreddit/Category=New/Limit=25 in the UI, then copy whatever parameters it actually saves back into this JSON if you want the file to match. Requires a 'Reddit OAuth2 API' credential attached below.",
+      "position": [660, 0],
+      "credentials": {
+        "redditOAuth2Api": { "id": "YOUR_REDDIT_CRED_ID", "name": "Reddit account" }
+      }
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// Defensive: the Reddit node's exact output field names can vary by n8n version.\n// Run this node once, check the output in n8n's UI, and adjust the field\n// names on the right-hand side below to match what you actually see.\nconst d = $json;\nconst permalink = d.permalink ? ('https://www.reddit.com' + d.permalink) : (d.url || '');\nreturn [{\n  json: {\n    id: d.id || d.name,\n    subreddit: d.subreddit,\n    title: d.title,\n    selftext: d.selftext || d.body || d.text || '',\n    permalink,\n    author: d.author,\n    created_utc: d.created_utc || d.created,\n    num_comments: d.num_comments\n  }\n}];"
+      },
+      "id": "flatten",
+      "name": "Flatten Listing",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [880, 0]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "strict" },
+          "conditions": [
+            {
+              "leftValue": "={{ $json.created_utc }}",
+              "rightValue": "={{ Math.floor(Date.now()/1000) - 10800 }}",
+              "operator": { "type": "number", "operation": "gt" }
+            }
+          ],
+          "combinator": "and"
+        }
+      },
+      "id": "recentFilter",
+      "name": "Recent Only (last 3h)",
+      "type": "n8n-nodes-base.filter",
+      "typeVersion": 2.2,
+      "position": [1100, 0]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "const patterns = $('Config').first().json.painPatterns.map(p => new RegExp(p, 'i'));\nconst text = ((($json.title || '') + ' ' + ($json.selftext || ''))).toLowerCase();\nconst matched = patterns.filter(re => re.test(text)).map(re => re.source);\nif (matched.length === 0) return [];\nreturn [{ json: { ...$json, matchedPatterns: matched } }];"
+      },
+      "id": "regexFilter",
+      "name": "Regex Pre-Filter",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1320, 0]
+    },
+    {
+      "parameters": {
+        "aggregate": "aggregateAllItemData",
+        "destinationFieldName": "posts"
+      },
+      "id": "aggregateCandidates",
+      "name": "Collect Candidates",
+      "type": "n8n-nodes-base.aggregate",
+      "typeVersion": 1,
+      "position": [1540, 0]
+    },
+    {
+      "parameters": {
+        "jsCode": "const posts = $json.posts || [];\nif (posts.length === 0) return [{ json: { ids: [], posts: [] } }];\nconst ids = posts.map(p => p.id);\nreturn [{ json: { ids, posts } }];"
+      },
+      "id": "buildDedupQuery",
+      "name": "Build Dedup Query",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1760, 0]
+    },
+    {
+      "parameters": {
+        "url": "=https://YOUR_PROJECT_REF.supabase.co/rest/v1/reddit_processed_posts?select=id&id=in.({{ $json.ids.join(',') }})",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "apikey", "value": "={{ $credentials.supabaseServiceKey }}" },
+            { "name": "Authorization", "value": "=Bearer {{ $credentials.supabaseServiceKey }}" }
+          ]
+        },
+        "options": {}
+      },
+      "id": "queryExisting",
+      "name": "Query Existing IDs",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1980, 0]
+    },
+    {
+      "parameters": {
+        "jsCode": "const existing = new Set((Array.isArray($json) ? $json : []).map(r => r.id));\nconst posts = $('Build Dedup Query').first().json.posts;\nconst fresh = posts.filter(p => !existing.has(p.id));\nreturn fresh.map(p => ({ json: p }));"
+      },
+      "id": "filterNew",
+      "name": "Filter Out Already Processed",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [2200, 0]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://openrouter.ai/api/v1/chat/completions",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Authorization", "value": "=Bearer {{ $credentials.openRouterApiKey }}" },
+            { "name": "Content-Type", "value": "application/json" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ model: \"anthropic/claude-3-5-haiku\", response_format: { type: \"json_object\" }, messages: [ { role: \"system\", content: \"You are a B2B pain-point qualifier for a freelance automation/dev consultant. Given a Reddit post title, body, and the phrase patterns it matched, decide whether this is a genuine, specific, currently-unsolved operational or technical pain point a small automation or SaaS build could fix. Output strict JSON only, no markdown: {\\\"intentScore\\\": 0-100 (80+ = actively seeking a tool or consultant right now), \\\"painPointSummary\\\": string, \\\"buyerSignal\\\": \\\"low\\\"|\\\"medium\\\"|\\\"high\\\", \\\"suggestedOutreachDraft\\\": string (empathetic, references their specific wording, offers one quick free tip, ends with a soft question - not a pitch - under 80 words)}\" }, { role: \"user\", content: \"Title: \" + $json.title + \"\\n\\nBody: \" + $json.selftext + \"\\n\\nMatched signals: \" + $json.matchedPatterns.join(', ') } ] }) }}"
+      },
+      "id": "aiScorer",
+      "name": "OpenRouter Pain Scorer",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [2420, 0]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "const raw = $json.choices && $json.choices[0] && $json.choices[0].message && $json.choices[0].message.content;\nlet parsed;\ntry {\n  parsed = JSON.parse(raw);\n} catch (e) {\n  return [];\n}\nconst source = $('Filter Out Already Processed').item.json;\nreturn [{\n  json: {\n    ...source,\n    intentScore: parsed.intentScore,\n    painPointSummary: parsed.painPointSummary,\n    buyerSignal: parsed.buyerSignal,\n    suggestedOutreachDraft: parsed.suggestedOutreachDraft\n  }\n}];"
+      },
+      "id": "parseAI",
+      "name": "Parse AI Output",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [2640, 0]
+    },
+    {
+      "parameters": {
+        "operation": "create",
+        "tableId": "reddit_processed_posts",
+        "dataToSend": "autoMapInputData"
+      },
+      "id": "logAll",
+      "name": "Log All Evaluated Posts",
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [2860, 0],
+      "credentials": {
+        "supabaseApi": { "id": "YOUR_SUPABASE_CRED_ID", "name": "Supabase account" }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "conditions": [
+            { "leftValue": "={{ $json.intentScore }}", "rightValue": 75, "operator": { "type": "number", "operation": "gte" } }
+          ],
+          "combinator": "and"
+        }
+      },
+      "id": "highIntentIf",
+      "name": "High Intent?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [3080, 0]
+    },
+    {
+      "parameters": {
+        "chatId": "YOUR_TELEGRAM_CHAT_ID",
+        "text": "=🚨 REVIEW BEFORE SENDING\n\nr/{{$json.subreddit}} | Intent: {{$json.intentScore}}/100 | Buyer signal: {{$json.buyerSignal}}\n\nPost: {{$json.title}}\n{{$json.permalink}}\n\nPain: {{$json.painPointSummary}}\n\nDraft (edit before sending):\n{{$json.suggestedOutreachDraft}}",
+        "additionalFields": { "parse_mode": "Markdown" }
+      },
+      "id": "telegramAlert",
+      "name": "Telegram Alert (Human Review)",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.1,
+      "position": [3300, -100],
+      "credentials": {
+        "telegramApi": { "id": "YOUR_TELEGRAM_CRED_ID", "name": "Telegram account" }
+      }
+    }
+  ],
+  "connections": {
+    "Every 45 Min": { "main": [[{ "node": "Config", "type": "main", "index": 0 }]] },
+    "Config": { "main": [[{ "node": "Split Into Subreddit Items", "type": "main", "index": 0 }]] },
+    "Split Into Subreddit Items": { "main": [[{ "node": "Fetch Subreddit New Posts", "type": "main", "index": 0 }]] },
+    "Fetch Subreddit New Posts": { "main": [[{ "node": "Flatten Listing", "type": "main", "index": 0 }]] },
+    "Flatten Listing": { "main": [[{ "node": "Recent Only (last 3h)", "type": "main", "index": 0 }]] },
+    "Recent Only (last 3h)": { "main": [[{ "node": "Regex Pre-Filter", "type": "main", "index": 0 }]] },
+    "Regex Pre-Filter": { "main": [[{ "node": "Collect Candidates", "type": "main", "index": 0 }]] },
+    "Collect Candidates": { "main": [[{ "node": "Build Dedup Query", "type": "main", "index": 0 }]] },
+    "Build Dedup Query": { "main": [[{ "node": "Query Existing IDs", "type": "main", "index": 0 }]] },
+    "Query Existing IDs": { "main": [[{ "node": "Filter Out Already Processed", "type": "main", "index": 0 }]] },
+    "Filter Out Already Processed": { "main": [[{ "node": "OpenRouter Pain Scorer", "type": "main", "index": 0 }]] },
+    "OpenRouter Pain Scorer": { "main": [[{ "node": "Parse AI Output", "type": "main", "index": 0 }]] },
+    "Parse AI Output": { "main": [[{ "node": "Log All Evaluated Posts", "type": "main", "index": 0 }]] },
+    "Log All Evaluated Posts": { "main": [[{ "node": "High Intent?", "type": "main", "index": 0 }]] },
+    "High Intent?": { "main": [[{ "node": "Telegram Alert (Human Review)", "type": "main", "index": 0 }], []] }
+  }
+}
